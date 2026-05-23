@@ -10,6 +10,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use('/twilio', twilioRoutes);
 app.use('/meta', metaRoutes);
 
+app.get('/', (req, res) => res.json({ status: 'ok', service: 'general-bot' }));
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 module.exports = app;
