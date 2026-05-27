@@ -2,9 +2,64 @@ const { sendTextMessage, sendInteractiveList, sendInteractiveButtons } = require
 const { getSession, setSession, clearSession } = require('../services/conversationService');
 const jira = require('../services/jiraService');
 
+// ─── Gestión de timers de inactividad ────────────────────────────────────────
+
+const INACTIVITY_MS = 3 * 60 * 1000; // 3 minutos
+const timers = new Map();
+
+// Mensaje de despedida — razón: 'cancel' | 'timeout'
+const sendGoodbye = async (to, reason) => {
+  if (reason === 'cancel') {
+    await sendTextMessage(
+      to,
+      `✅ *¡Proceso cancelado!* 👍\n\n` +
+      `No hay problema, ¡tú tienes el control! 😊\n\n` +
+      `Fue un placer ayudarte. Cuando quieras retomar escribe *hola* y estaré listo. 🤖💙\n\n` +
+      `¡Que tengas un día increíble! ☀️✨🌟`,
+    );
+  } else {
+    await sendTextMessage(
+      to,
+      `⏰ *Sesión cerrada por inactividad*\n\n` +
+      `Parece que te fuiste un rato — ¡sin problema! 😊\n\n` +
+      `Cuando quieras continuar escribe *hola* o *menu* y estaré aquí. 🤖💙\n\n` +
+      `¡Que tengas un excelente día! ☀️✨🌟`,
+    );
+  }
+};
+
+const cancelExpiry = (userId) => {
+  if (timers.has(userId)) {
+    clearTimeout(timers.get(userId));
+    timers.delete(userId);
+  }
+};
+
+const scheduleExpiry = (userId) => {
+  cancelExpiry(userId);
+  const timer = setTimeout(async () => {
+    timers.delete(userId);
+    if (getSession(userId)) {
+      clearSession(userId);
+      try {
+        await sendGoodbye(userId, 'timeout');
+      } catch (err) {
+        console.error(`[JiraBot] Error al enviar goodbye por timeout a ${userId}:`, err.message);
+      }
+    }
+  }, INACTIVITY_MS);
+  timers.set(userId, timer);
+};
+
+// Wrapper de setSession que siempre reinicia el timer de inactividad
+const startSession = (to, state) => {
+  setSession(to, state);
+  scheduleExpiry(to);
+};
+
 // ─── Mensajes base ────────────────────────────────────────────────────────────
 
-// Psicología: reciprocidad (valor inmediato) + liking (tono cálido) + micro-sí (propuesta irresistible)
+// Psicología: reciprocidad + liking + micro-sí + aviso de control (cancelar)
 const GREETING_TEXT =
   `¡Hola! 👋 ¡Qué bueno tenerte aquí! 😊\n\n` +
   `Soy *JiraBot* 🤖, tu asistente personal de Jira — directo en WhatsApp, sin abrir el navegador. 💡\n\n` +
@@ -16,16 +71,16 @@ const GREETING_TEXT =
   `🔄 *Cambiar estados* y mantener el flujo\n` +
   `💬 *Comentar* y colaborar con tu equipo\n\n` +
   `✨ _¡Todo desde la palma de tu mano!_\n\n` +
+  `💡 _Escribe *cancelar* en cualquier momento para detener el proceso, o *menu* para volver al inicio._\n\n` +
   `👇 *Elige una opción para comenzar:*`;
 
-// Psicología: consistencia (acción completada = retomar flujo positivo)
 const RETURN_TEXT = `🎯 ¿Qué más puedo hacer por ti hoy?\n\n👇 *Elige tu próxima acción:*`;
 
 // ─── Menú ─────────────────────────────────────────────────────────────────────
 
 const MENU_PAYLOAD = {
   header: '🤖 JiraBot — Tu asistente Jira',
-  footer: '💡 Escribe *menu* en cualquier momento para volver aquí',
+  footer: '💡 Escribe *menu* para volver aquí',
   buttonText: '📋 Ver opciones',
   sections: [
     {
@@ -52,6 +107,7 @@ const sendMainMenu = async (to, bodyText = RETURN_TEXT) =>
   sendInteractiveList(to, { ...MENU_PAYLOAD, body: bodyText });
 
 const sendWelcomeAndMenu = async (to) => {
+  cancelExpiry(to);
   await sendTextMessage(to, GREETING_TEXT);
   await sendInteractiveList(to, { ...MENU_PAYLOAD, body: `👆 *Aquí tienes todo lo que puedo hacer por ti:*` });
 };
@@ -60,7 +116,7 @@ const sendWelcomeAndMenu = async (to) => {
 
 // Psicología: progress indicators reducen abandono en flujos largos
 const step = (current, total, label) =>
-  `📍 Paso ${current} de ${total} — ${label}\n${'▰'.repeat(current)}${'▱'.repeat(total - current)}\n\n`;
+  `📍 _Paso ${current} de ${total}_ — ${label}\n`;
 
 const formatIssue = (issue) => {
   const f        = issue.fields;
@@ -81,8 +137,9 @@ const formatIssue = (issue) => {
   );
 };
 
-// Retorna al menú principal con mensaje de éxito (refuerzo positivo)
+// Finaliza flujo: cancela timer, limpia sesión y vuelve al menú
 const done = async (to) => {
+  cancelExpiry(to);
   clearSession(to);
   await sendMainMenu(to);
 };
@@ -103,7 +160,7 @@ const handleGetProjects = async (to) => {
       );
     }
   } catch (err) {
-    await sendTextMessage(to, `😟 Ups, algo salió mal al obtener los proyectos.\n\n_Error: ${err.message}_`);
+    await sendTextMessage(to, `😟 Algo salió mal al obtener los proyectos.\n\n_Error: ${err.message}_`);
   }
   await done(to);
 };
@@ -111,17 +168,17 @@ const handleGetProjects = async (to) => {
 const handleMenuSelection = async (to, selectedId) => {
   switch (selectedId) {
     case 'get_issue':
-      setSession(to, { flow: 'get_issue', step: 'await_key', data: {} });
+      startSession(to, { flow: 'get_issue', step: 'await_key', data: {} });
       await sendTextMessage(
         to,
         `🔍 *Consultar Issue*\n\n` +
-        `¡Perfecto! 😊 Dime la *clave del issue* que deseas consultar y te traigo toda la información al instante.\n\n` +
+        `¡Perfecto! 😊 Dime la *clave del issue* que deseas consultar y te traigo toda la información.\n\n` +
         `_Ejemplo: *PROJ-123*_`,
       );
       break;
 
     case 'search_issues':
-      setSession(to, { flow: 'search_issues', step: 'await_project', data: {} });
+      startSession(to, { flow: 'search_issues', step: 'await_project', data: {} });
       await sendTextMessage(
         to,
         `🔎 *Buscar Issues*\n\n` +
@@ -136,7 +193,7 @@ const handleMenuSelection = async (to, selectedId) => {
       break;
 
     case 'create_issue':
-      setSession(to, { flow: 'create_issue', step: 'await_project', data: {} });
+      startSession(to, { flow: 'create_issue', step: 'await_project', data: {} });
       await sendTextMessage(
         to,
         `➕ *Crear Issue*\n\n` +
@@ -147,7 +204,7 @@ const handleMenuSelection = async (to, selectedId) => {
       break;
 
     case 'update_issue':
-      setSession(to, { flow: 'update_issue', step: 'await_key', data: {} });
+      startSession(to, { flow: 'update_issue', step: 'await_key', data: {} });
       await sendTextMessage(
         to,
         `✏️ *Actualizar Issue*\n\n` +
@@ -158,7 +215,7 @@ const handleMenuSelection = async (to, selectedId) => {
       break;
 
     case 'transition_issue':
-      setSession(to, { flow: 'transition_issue', step: 'await_key', data: {} });
+      startSession(to, { flow: 'transition_issue', step: 'await_key', data: {} });
       await sendTextMessage(
         to,
         `🔄 *Cambiar Estado*\n\n` +
@@ -169,7 +226,7 @@ const handleMenuSelection = async (to, selectedId) => {
       break;
 
     case 'add_comment':
-      setSession(to, { flow: 'add_comment', step: 'await_key', data: {} });
+      startSession(to, { flow: 'add_comment', step: 'await_key', data: {} });
       await sendTextMessage(
         to,
         `💬 *Agregar Comentario*\n\n` +
@@ -189,6 +246,9 @@ const handleMenuSelection = async (to, selectedId) => {
 const handleFlowStep = async (to, session, text, interactiveId) => {
   const { flow, step: currentStep, data } = session;
   const input = (interactiveId || text || '').trim();
+
+  // Reinicia el timer en cada interacción del flujo
+  scheduleExpiry(to);
 
   // ── GET ISSUE ──────────────────────────────────────────────────────────────
   if (flow === 'get_issue' && currentStep === 'await_key') {
@@ -210,13 +270,13 @@ const handleFlowStep = async (to, session, text, interactiveId) => {
   // ── SEARCH ISSUES ──────────────────────────────────────────────────────────
   if (flow === 'search_issues' && currentStep === 'await_project') {
     const projectKey = input.toLowerCase() === 'omitir' ? null : input.toUpperCase();
-    setSession(to, { flow: 'search_issues', step: 'await_status', data: { projectKey } });
+    startSession(to, { flow: 'search_issues', step: 'await_status', data: { projectKey } });
     await sendInteractiveButtons(to, {
       body:
         `🔎 *Buscar Issues*\n\n` +
         `${step(2, 2, 'Filtrar por estado')}\n` +
-        `¡Ya casi! 🙌 ¿Quieres filtrar por algún *estado* en particular?`,
-      footer: '💡 Selecciona uno o escribe el estado manualmente',
+        `¡Ya casi! 🙌 ¿Quieres filtrar por algún *estado*?`,
+      footer: '💡 Selecciona uno o escribe el estado',
       buttons: [
         { id: 'status_todo',       title: '⚪ To Do' },
         { id: 'status_inprogress', title: '🔵 In Progress' },
@@ -258,19 +318,19 @@ const handleFlowStep = async (to, session, text, interactiveId) => {
 
   // ── CREATE ISSUE ───────────────────────────────────────────────────────────
   if (flow === 'create_issue' && currentStep === 'await_project') {
-    setSession(to, { flow: 'create_issue', step: 'await_summary', data: { projectKey: input.toUpperCase() } });
+    startSession(to, { flow: 'create_issue', step: 'await_summary', data: { projectKey: input.toUpperCase() } });
     await sendTextMessage(
       to,
       `➕ *Crear Issue en ${input.toUpperCase()}*\n\n` +
       `${step(2, 5, 'Resumen')}\n` +
-      `¡Genial! 🎯 Ahora cuéntame: ¿cuál es el *título o resumen* de tu issue?\n\n` +
+      `¡Genial! 🎯 ¿Cuál es el *título o resumen* de tu issue?\n\n` +
       `_Sé conciso y descriptivo — un buen título ayuda a todo el equipo. 💡_`,
     );
     return;
   }
 
   if (flow === 'create_issue' && currentStep === 'await_summary') {
-    setSession(to, { flow: 'create_issue', step: 'await_type', data: { ...data, summary: input } });
+    startSession(to, { flow: 'create_issue', step: 'await_type', data: { ...data, summary: input } });
     await sendInteractiveButtons(to, {
       body:
         `➕ *Crear Issue*\n\n` +
@@ -289,13 +349,13 @@ const handleFlowStep = async (to, session, text, interactiveId) => {
   if (flow === 'create_issue' && currentStep === 'await_type') {
     const typeMap = { type_task: 'Task', type_bug: 'Bug', type_story: 'Story' };
     const issueType = typeMap[interactiveId] || text || 'Task';
-    setSession(to, { flow: 'create_issue', step: 'await_priority', data: { ...data, issueType } });
+    startSession(to, { flow: 'create_issue', step: 'await_priority', data: { ...data, issueType } });
     await sendInteractiveButtons(to, {
       body:
         `➕ *Crear Issue*\n\n` +
         `${step(4, 5, 'Prioridad')}\n` +
         `¡Ya casi terminamos! 🏁 ¿Qué *prioridad* tiene este issue?`,
-      footer: '💡 Sé honesto con la prioridad — ayuda al equipo a organizarse',
+      footer: '💡 La prioridad ayuda al equipo a organizarse',
       buttons: [
         { id: 'priority_high',   title: '🔴 High' },
         { id: 'priority_medium', title: '🟡 Medium' },
@@ -308,12 +368,12 @@ const handleFlowStep = async (to, session, text, interactiveId) => {
   if (flow === 'create_issue' && currentStep === 'await_priority') {
     const priorityMap = { priority_high: 'High', priority_medium: 'Medium', priority_low: 'Low' };
     const priority = priorityMap[interactiveId] || text || 'Medium';
-    setSession(to, { flow: 'create_issue', step: 'await_description', data: { ...data, priority } });
+    startSession(to, { flow: 'create_issue', step: 'await_description', data: { ...data, priority } });
     await sendTextMessage(
       to,
       `➕ *Crear Issue*\n\n` +
       `${step(5, 5, 'Descripción')}\n` +
-      `¡Último paso! 🎉 ¿Quieres agregar una *descripción* más detallada?\n\n` +
+      `¡Último paso! 🎉 ¿Quieres agregar una *descripción* detallada?\n\n` +
       `_Escríbela aquí, o envía *omitir* si no es necesario. 👌_`,
     );
     return;
@@ -342,10 +402,7 @@ const handleFlowStep = async (to, session, text, interactiveId) => {
         `✨ _¡Tu issue ya está disponible para el equipo!_`,
       );
     } catch (err) {
-      await sendTextMessage(
-        to,
-        `😟 No pude crear el issue. Verifica los datos e intenta de nuevo.\n\n_Error: ${err.message}_`,
-      );
+      await sendTextMessage(to, `😟 No pude crear el issue.\n\n_Error: ${err.message}_`);
     }
     await done(to);
     return;
@@ -353,13 +410,13 @@ const handleFlowStep = async (to, session, text, interactiveId) => {
 
   // ── UPDATE ISSUE ───────────────────────────────────────────────────────────
   if (flow === 'update_issue' && currentStep === 'await_key') {
-    setSession(to, { flow: 'update_issue', step: 'await_field', data: { issueKey: input.toUpperCase() } });
+    startSession(to, { flow: 'update_issue', step: 'await_field', data: { issueKey: input.toUpperCase() } });
     await sendInteractiveList(to, {
       body:
         `✏️ *Actualizar Issue ${input.toUpperCase()}*\n\n` +
         `${step(2, 3, 'Seleccionar campo')}\n` +
         `¿Qué campo deseas modificar? 🛠️`,
-      footer: '💡 Puedes actualizar varios campos uno a la vez',
+      footer: '💡 Puedes actualizar un campo a la vez',
       buttonText: '📋 Ver campos',
       sections: [{
         title: 'Campos disponibles',
@@ -384,7 +441,7 @@ const handleFlowStep = async (to, session, text, interactiveId) => {
       await sendTextMessage(to, `⚠️ Opción no reconocida. Por favor selecciona una opción válida del menú. 👆`);
       return;
     }
-    setSession(to, { flow: 'update_issue', step: 'await_value', data: { ...data, field: fieldMeta.key } });
+    startSession(to, { flow: 'update_issue', step: 'await_value', data: { ...data, field: fieldMeta.key } });
     await sendTextMessage(
       to,
       `✏️ *Actualizar Issue ${data.issueKey}*\n\n` +
@@ -412,19 +469,19 @@ const handleFlowStep = async (to, session, text, interactiveId) => {
 
   // ── TRANSITION ISSUE ───────────────────────────────────────────────────────
   if (flow === 'transition_issue' && currentStep === 'await_key') {
-    await sendTextMessage(to, `⏳ _Cargando estados disponibles para *${input.toUpperCase()}*..._`);
+    await sendTextMessage(to, `⏳ _Cargando estados de *${input.toUpperCase()}*..._`);
     try {
       const transitions = await jira.getTransitions(input.toUpperCase());
       if (!transitions.length) {
         await sendTextMessage(
           to,
-          `ℹ️ El issue *${input.toUpperCase()}* no tiene transiciones disponibles en este momento.\n\n` +
-          `💡 _Puede que ya esté en el estado final o no tengas permisos para moverlo._`,
+          `ℹ️ El issue *${input.toUpperCase()}* no tiene transiciones disponibles.\n\n` +
+          `💡 _Puede que ya esté en el estado final o no tengas permisos._`,
         );
         await done(to);
         return;
       }
-      setSession(to, { flow: 'transition_issue', step: 'await_transition', data: { issueKey: input.toUpperCase(), transitions } });
+      startSession(to, { flow: 'transition_issue', step: 'await_transition', data: { issueKey: input.toUpperCase(), transitions } });
 
       const body =
         `🔄 *Cambiar Estado: ${input.toUpperCase()}*\n\n` +
@@ -434,7 +491,7 @@ const handleFlowStep = async (to, session, text, interactiveId) => {
       if (transitions.length > 3) {
         await sendInteractiveList(to, {
           body,
-          footer: '💡 Selecciona el estado al que deseas mover el issue',
+          footer: '💡 Selecciona el estado al que deseas mover',
           buttonText: '🔄 Ver estados',
           sections: [{
             title: 'Estados disponibles',
@@ -452,7 +509,7 @@ const handleFlowStep = async (to, session, text, interactiveId) => {
       await sendTextMessage(
         to,
         `😟 No encontré el issue *${input.toUpperCase()}*.\n\n` +
-        `💡 _Verifica la clave (ej: PROJ-123) y que tengas acceso al proyecto._`,
+        `💡 _Verifica la clave (ej: PROJ-123) y que tengas acceso._`,
       );
       await done(to);
     }
@@ -472,7 +529,7 @@ const handleFlowStep = async (to, session, text, interactiveId) => {
       await sendTextMessage(
         to,
         `🎉 *¡Estado actualizado exitosamente!*\n\n` +
-        `🎫 *${data.issueKey}* fue movido a *${transition?.name || transitionId}* ✅\n\n` +
+        `🎫 *${data.issueKey}* movido a *${transition?.name || transitionId}* ✅\n\n` +
         `✨ _¡El equipo verá el cambio en tiempo real!_`,
       );
     } catch (err) {
@@ -484,13 +541,13 @@ const handleFlowStep = async (to, session, text, interactiveId) => {
 
   // ── ADD COMMENT ────────────────────────────────────────────────────────────
   if (flow === 'add_comment' && currentStep === 'await_key') {
-    setSession(to, { flow: 'add_comment', step: 'await_text', data: { issueKey: input.toUpperCase() } });
+    startSession(to, { flow: 'add_comment', step: 'await_text', data: { issueKey: input.toUpperCase() } });
     await sendTextMessage(
       to,
       `💬 *Comentar en ${input.toUpperCase()}*\n\n` +
       `${step(2, 2, 'Escribir comentario')}\n` +
-      `¡Perfecto! 😊 Escribe el *comentario* que deseas agregar al issue:\n\n` +
-      `_Tu comentario será visible para todo el equipo con acceso al proyecto. 👥_`,
+      `¡Perfecto! 😊 Escribe el *comentario* que deseas agregar:\n\n` +
+      `_Será visible para todo el equipo con acceso al proyecto. 👥_`,
     );
     return;
   }
@@ -517,11 +574,12 @@ const handleFlowStep = async (to, session, text, interactiveId) => {
 
 // ─── Punto de entrada ─────────────────────────────────────────────────────────
 
-const RESET_KEYWORDS = new Set(['menu', 'menú', 'inicio', 'hola', 'hi', 'hello', 'cancelar', 'cancel', 'start', '/start']);
+const CANCEL_KEYWORDS = new Set(['cancelar', 'cancel']);
+const RESET_KEYWORDS  = new Set(['menu', 'menú', 'inicio', 'hola', 'hi', 'hello', 'start', '/start']);
 
 const handleMessage = async (message) => {
   const to = message.from;
-  let text        = null;
+  let text          = null;
   let interactiveId = null;
 
   if (message.type === 'text') {
@@ -531,8 +589,19 @@ const handleMessage = async (message) => {
     interactiveId = type === 'list_reply' ? list_reply?.id : button_reply?.id;
   }
 
-  // Reset explícito por keyword → siempre limpia y muestra bienvenida
-  if (text && RESET_KEYWORDS.has(text.toLowerCase())) {
+  const lowerText = text?.toLowerCase();
+
+  // Cancelar → despedida y cierra todo
+  if (text && CANCEL_KEYWORDS.has(lowerText)) {
+    cancelExpiry(to);
+    clearSession(to);
+    await sendGoodbye(to, 'cancel');
+    return;
+  }
+
+  // Reset keywords → bienvenida + menú
+  if (text && RESET_KEYWORDS.has(lowerText)) {
+    cancelExpiry(to);
     clearSession(to);
     await sendWelcomeAndMenu(to);
     return;
@@ -541,7 +610,6 @@ const handleMessage = async (message) => {
   const session = getSession(to);
 
   // Respuesta interactiva sin flujo activo → selección del menú principal
-  // (cubre el caso de sesión nula y el caso de sesión sin flow)
   if (interactiveId && (!session || !session.flow)) {
     await handleMenuSelection(to, interactiveId);
     return;

@@ -50,7 +50,7 @@ const sendInteractiveList = async (to, { header, body, footer, buttonText = '�
 // buttons: [{ id, title }] — máximo 3
 const sendInteractiveButtons = async (to, { body, footer, buttons }) => {
   const { url, headers } = getClient();
-  const { data } = await axios.post(url, {
+  const payload = {
     messaging_product: 'whatsapp',
     recipient_type: 'individual',
     to,
@@ -63,8 +63,16 @@ const sendInteractiveButtons = async (to, { body, footer, buttons }) => {
         buttons: buttons.map((b) => ({ type: 'reply', reply: { id: b.id, title: b.title } })),
       },
     },
-  }, { headers });
-  return data;
+  };
+  try {
+    const { data } = await axios.post(url, payload, { headers });
+    return data;
+  } catch (err) {
+    const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
+    console.error('[whatsappService] sendInteractiveButtons 400 payload:', JSON.stringify(payload));
+    console.error('[whatsappService] sendInteractiveButtons error:', detail);
+    throw err;
+  }
 };
 
 module.exports = { sendTextMessage, sendInteractiveList, sendInteractiveButtons };
