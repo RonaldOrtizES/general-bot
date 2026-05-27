@@ -21,8 +21,7 @@ router.post('/calls/webhook', (req, res) => {
   res.set('Content-Type', 'text/xml');
   res.send(`<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say>Thank you for calling. Please leave a message after the tone.</Say>
-  <Record maxLength="30" />
+    <Dial>+50361273462</Dial>
 </Response>`);
 });
 
