@@ -531,18 +531,25 @@ const handleMessage = async (message) => {
     interactiveId = type === 'list_reply' ? list_reply?.id : button_reply?.id;
   }
 
-  const session = getSession(to);
-
-  // Sin sesión activa o keyword de reset → saludo completo + menú
-  if (!session || RESET_KEYWORDS.has(text?.toLowerCase())) {
+  // Reset explícito por keyword → siempre limpia y muestra bienvenida
+  if (text && RESET_KEYWORDS.has(text.toLowerCase())) {
     clearSession(to);
     await sendWelcomeAndMenu(to);
     return;
   }
 
-  // Sin flujo activo pero hay una respuesta del menú (interactive reply)
-  if (interactiveId && !session.flow) {
+  const session = getSession(to);
+
+  // Respuesta interactiva sin flujo activo → selección del menú principal
+  // (cubre el caso de sesión nula y el caso de sesión sin flow)
+  if (interactiveId && (!session || !session.flow)) {
     await handleMenuSelection(to, interactiveId);
+    return;
+  }
+
+  // Sin sesión y sin interactive → primer contacto o sesión expirada
+  if (!session) {
+    await sendWelcomeAndMenu(to);
     return;
   }
 
