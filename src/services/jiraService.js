@@ -31,9 +31,9 @@ const searchIssues = async ({ projectKey, issueType, status, assignee, maxResult
 
   const conditions = [];
   if (projectKey) conditions.push(`project = "${projectKey}"`);
-  if (issueType) conditions.push(`issuetype = "${issueType}"`);
-  if (status) conditions.push(`status = "${status}"`);
-  if (assignee) conditions.push(`assignee = "${assignee}"`);
+  if (issueType)  conditions.push(`issuetype = "${issueType}"`);
+  if (status)     conditions.push(`status = "${status}"`);
+  if (assignee)   conditions.push(`assignee = "${assignee}"`);
 
   const jql = conditions.length > 0 ? conditions.join(' AND ') : 'ORDER BY created DESC';
 
@@ -47,7 +47,7 @@ const createIssue = async ({ projectKey, summary, description, issueType = 'Task
   const client = buildClient();
 
   const fields = {
-    project: { key: projectKey },
+    project:   { key: projectKey },
     summary,
     issuetype: { name: issueType },
     ...(description && {
@@ -57,7 +57,7 @@ const createIssue = async ({ projectKey, summary, description, issueType = 'Task
         content: [{ type: 'paragraph', content: [{ type: 'text', text: description }] }],
       },
     }),
-    ...(priority && { priority: { name: priority } }),
+    ...(priority   && { priority: { name: priority } }),
     ...(assigneeId && { assignee: { id: assigneeId } }),
     ...(labels.length > 0 && { labels }),
   };
