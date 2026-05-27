@@ -2,7 +2,7 @@ const { sendTextMessage, sendInteractiveList, sendInteractiveButtons } = require
 const { getSession, setSession, clearSession } = require('../services/conversationService');
 const jira = require('../services/jiraService');
 
-// ─── Gestión de timers de inactividad ────────────────────────────────────────
+// ─── Timers de inactividad ────────────────────────────────────────────────────
 
 const INACTIVITY_MS = 3 * 60 * 1000;
 const timers = new Map();
@@ -40,10 +40,8 @@ const scheduleExpiry = (userId) => {
     timers.delete(userId);
     if (getSession(userId)) {
       clearSession(userId);
-      try {
-        await sendGoodbye(userId, 'timeout');
-      } catch (err) {
-        console.error(`[JiraBot] Error al enviar goodbye por timeout a ${userId}:`, err.message);
+      try { await sendGoodbye(userId, 'timeout'); } catch (e) {
+        console.error(`[JiraBot] timeout goodbye error ${userId}:`, e.message);
       }
     }
   }, INACTIVITY_MS);
@@ -55,26 +53,27 @@ const startSession = (to, state) => {
   scheduleExpiry(to);
 };
 
-// ─── IDs conocidos del menú principal (para detectar selecciones fuera de contexto) ──
+// ─── IDs exclusivos del menú principal ───────────────────────────────────────
+// Solo estos IDs deben llegar a handleMenuSelection
 const MENU_IDS = new Set([
   'get_issue', 'search_issues', 'get_projects',
   'create_issue', 'update_issue', 'transition_issue', 'add_comment',
 ]);
 
-// ─── Mensajes base ────────────────────────────────────────────────────────────
+// ─── Textos fijos ─────────────────────────────────────────────────────────────
 
 const GREETING_TEXT =
   `¡Hola! 👋 ¡Qué bueno tenerte aquí! 😊\n\n` +
   `Soy *JiraBot* 🤖, tu asistente personal de Jira — directo en WhatsApp, sin abrir el navegador. 💡\n\n` +
   `Con solo unos mensajes puedes:\n` +
   `🎫 *Consultar* cualquier issue al instante\n` +
-  `🔎 *Buscar* y filtrar tareas de tu equipo\n` +
+  `🔎 *Explorar* issues por proyecto\n` +
   `➕ *Crear* nuevos issues en segundos\n` +
   `✏️ *Actualizar* y gestionar issues existentes\n` +
   `🔄 *Cambiar estados* y mantener el flujo\n` +
   `💬 *Comentar* y colaborar con tu equipo\n\n` +
   `✨ _¡Todo desde la palma de tu mano!_\n\n` +
-  `💡 _Escribe *cancelar* para detener el proceso, o *menu* para volver al inicio._\n\n` +
+  `💡 _Escribe *cancelar* para detener el proceso o *menu* para volver al inicio._\n\n` +
   `👇 *Elige una opción para comenzar:*`;
 
 const RETURN_TEXT = `🎯 ¿Qué más puedo hacer por ti hoy?\n\n👇 *Elige tu próxima acción:*`;
@@ -82,25 +81,25 @@ const RETURN_TEXT = `🎯 ¿Qué más puedo hacer por ti hoy?\n\n👇 *Elige tu 
 // ─── Menú ─────────────────────────────────────────────────────────────────────
 
 const MENU_PAYLOAD = {
-  header: '🤖 JiraBot — Tu asistente Jira',
-  footer: '💡 Escribe *menu* para volver aquí',
+  header:     '🤖 JiraBot — Tu asistente Jira',
+  footer:     '💡 Escribe *menu* para volver aquí',
   buttonText: '📋 Ver opciones',
   sections: [
     {
-      title: '🔍 Consultas rápidas',
+      title: '🔍 Consultas',
       rows: [
-        { id: 'get_issue',     title: '🎫 Consultar issue',  description: 'Ver todos los detalles de un issue' },
-        { id: 'search_issues', title: '🔎 Buscar issues',    description: 'Filtrar por proyecto, estado y más' },
-        { id: 'get_projects',  title: '📁 Ver proyectos',    description: 'Listar todos los proyectos' },
+        { id: 'get_issue',     title: '🎫 Consultar issue',  description: 'Busca un issue por su clave' },
+        { id: 'search_issues', title: '🔎 Explorar issues',  description: 'Explora issues por proyecto' },
+        { id: 'get_projects',  title: '📁 Ver proyectos',    description: 'Lista todos los proyectos' },
       ],
     },
     {
-      title: '⚙️ Gestión de issues',
+      title: '⚙️ Gestión',
       rows: [
-        { id: 'create_issue',     title: '➕ Crear issue',      description: 'Crear un nuevo issue en tu proyecto' },
-        { id: 'update_issue',     title: '✏️ Actualizar issue', description: 'Modificar datos de un issue existente' },
-        { id: 'transition_issue', title: '🔄 Cambiar estado',   description: 'Mover un issue a otro estado del flujo' },
-        { id: 'add_comment',      title: '💬 Comentar issue',   description: 'Añadir un comentario a un issue' },
+        { id: 'create_issue',     title: '➕ Crear issue',      description: 'Crear un nuevo issue' },
+        { id: 'update_issue',     title: '✏️ Actualizar issue', description: 'Modificar un issue existente' },
+        { id: 'transition_issue', title: '🔄 Cambiar estado',   description: 'Mover un issue a otro estado' },
+        { id: 'add_comment',      title: '💬 Comentar issue',   description: 'Añadir comentario a un issue' },
       ],
     },
   ],
@@ -146,24 +145,22 @@ const done = async (to) => {
 };
 
 // ─── Selector de proyectos ────────────────────────────────────────────────────
-// includeAll: agrega opción "Todos los proyectos" (para búsquedas)
-const sendProjectPicker = async (to, { body, includeAll = false }) => {
+
+const sendProjectPicker = async (to, { body }) => {
   await sendTextMessage(to, `⏳ _Cargando proyectos disponibles..._`);
-  const projects = await jira.getProjects(); // lanza si falla → capturar en el caller
+  const projects = await jira.getProjects(); // deja lanzar si falla
 
-  // Construye la lista de items (ALL primero si aplica)
-  const items = [];
-  if (includeAll) items.push({ id: 'proj_ALL', name: '🌐 Todos los proyectos', key: null });
-  projects.forEach((p) => items.push({ id: `proj_${p.key}`, name: p.name, key: p.key }));
+  if (!projects.length) throw new Error('Sin proyectos disponibles');
 
-  // ≤3 items → botones; >3 → lista interactiva
+  const items = projects.map((p) => ({ id: `proj_${p.key}`, name: p.name, key: p.key }));
+
   if (items.length <= 3) {
     await sendInteractiveButtons(to, {
       body,
       footer: '💡 Selecciona el proyecto',
       buttons: items.map((item) => ({
         id:    item.id,
-        title: (item.key ? `📁 ${item.key}` : '🌐 Todos').substring(0, 20),
+        title: `📁 ${item.key}`.substring(0, 20),
       })),
     });
   } else {
@@ -176,30 +173,28 @@ const sendProjectPicker = async (to, { body, includeAll = false }) => {
         rows: items.slice(0, 10).map((item) => ({
           id:          item.id,
           title:       item.name.substring(0, 24),
-          description: item.key ? `Clave: ${item.key}` : 'Buscar en todos',
+          description: `Clave: ${item.key}`,
         })),
       }],
     });
   }
 };
 
-// Extrae la project key del interactiveId (proj_KEY) o del texto libre
-// Devuelve null si el usuario eligió "Todos" (proj_ALL)
+// Extrae la project key desde un interactiveId tipo "proj_KEY" o desde texto libre
 const extractProjectKey = (interactiveId, text) => {
-  if (interactiveId === 'proj_ALL') return null;
-  if (interactiveId?.startsWith('proj_')) return interactiveId.slice(5);
+  if (interactiveId?.startsWith('proj_')) return interactiveId.slice(5) || null;
   const raw = (text || '').trim().toUpperCase();
-  return raw === 'OMITIR' ? null : (raw || null);
+  return raw === 'OMITIR' || !raw ? null : raw;
 };
 
-// ─── Handlers de cada opción ──────────────────────────────────────────────────
+// ─── Handlers del menú ────────────────────────────────────────────────────────
 
 const handleGetProjects = async (to) => {
   try {
     await sendTextMessage(to, `⏳ _Consultando proyectos en Jira..._`);
     const projects = await jira.getProjects();
     if (!projects.length) {
-      await sendTextMessage(to, `📁 Hmm... no encontré proyectos disponibles por ahora. 🤔`);
+      await sendTextMessage(to, `📁 No encontré proyectos disponibles por ahora. 🤔`);
     } else {
       const list = projects.slice(0, 20).map((p) => `• 📁 *${p.key}* — ${p.name}`).join('\n');
       await sendTextMessage(
@@ -221,23 +216,23 @@ const handleMenuSelection = async (to, selectedId) => {
       await sendTextMessage(
         to,
         `🔍 *Consultar Issue*\n\n` +
-        `¡Perfecto! 😊 Dime la *clave del issue* que deseas consultar.\n\n` +
+        `Dime la *clave del issue* que deseas consultar y te traigo todos los detalles. 😊\n\n` +
         `_Ejemplo: *PROJ-123*_`,
       );
       break;
 
     case 'search_issues':
+      // Flujo: proyecto → lista de issues → detalle del issue
       startSession(to, { flow: 'search_issues', step: 'await_project', data: {} });
       try {
         await sendProjectPicker(to, {
-          body:       `🔎 *Buscar Issues*\n\n${stepLabel(1, 2, 'Proyecto')}\n¿En qué proyecto quieres buscar?`,
-          includeAll: true,
+          body: `🔎 *Explorar Issues*\n\n${stepLabel(1, 2, 'Proyecto')}\n¿En qué proyecto quieres explorar?`,
         });
       } catch {
         await sendTextMessage(
           to,
-          `🔎 *Buscar Issues*\n\n${stepLabel(1, 2, 'Proyecto')}\n` +
-          `Ingresa la clave del proyecto o escribe *omitir* para buscar en todos:\n\n_Ejemplo: *PROJ*_`,
+          `🔎 *Explorar Issues*\n\n${stepLabel(1, 2, 'Proyecto')}\n` +
+          `Ingresa la clave del proyecto:\n\n_Ejemplo: *PROJ*_`,
         );
       }
       break;
@@ -250,8 +245,7 @@ const handleMenuSelection = async (to, selectedId) => {
       startSession(to, { flow: 'create_issue', step: 'await_project', data: {} });
       try {
         await sendProjectPicker(to, {
-          body:       `➕ *Crear Issue*\n\n${stepLabel(1, 5, 'Proyecto')}\n¡Vamos a crear tu issue! 🚀 ¿En qué proyecto lo creamos?`,
-          includeAll: false,
+          body: `➕ *Crear Issue*\n\n${stepLabel(1, 5, 'Proyecto')}\n¡Vamos a crear tu issue! 🚀 ¿En qué proyecto lo creamos?`,
         });
       } catch {
         await sendTextMessage(
@@ -294,13 +288,12 @@ const handleMenuSelection = async (to, selectedId) => {
   }
 };
 
-// ─── Manejo de cada paso del flujo ────────────────────────────────────────────
+// ─── Manejo paso a paso de cada flujo ─────────────────────────────────────────
 
 const handleFlowStep = async (to, session, text, interactiveId) => {
   const { flow, step: currentStep, data } = session;
 
-  // Si el usuario seleccionó del menú principal estando mid-flow,
-  // reiniciar limpiamente con esa selección en lugar de mezclar flujos
+  // Si el usuario seleccionó del menú principal estando mid-flow → redirigir limpiamente
   if (interactiveId && MENU_IDS.has(interactiveId)) {
     cancelExpiry(to);
     clearSession(to);
@@ -309,84 +302,98 @@ const handleFlowStep = async (to, session, text, interactiveId) => {
   }
 
   const input = (interactiveId || text || '').trim();
-
-  // Reinicia el timer en cada interacción dentro del flujo
-  scheduleExpiry(to);
+  scheduleExpiry(to); // resetea el timer en cada interacción
 
   // ── GET ISSUE ──────────────────────────────────────────────────────────────
   if (flow === 'get_issue' && currentStep === 'await_key') {
-    await sendTextMessage(to, `⏳ _Buscando el issue *${input.toUpperCase()}*..._`);
+    if (!input) { await sendTextMessage(to, `⚠️ Por favor ingresa la clave del issue. _Ejemplo: PROJ-123_`); return; }
+    await sendTextMessage(to, `⏳ _Buscando *${input.toUpperCase()}*..._`);
     try {
       const issue = await jira.getIssue(input.toUpperCase());
-      await sendTextMessage(to, `✅ ¡Lo encontré! Aquí tienes los detalles: 👇\n\n${formatIssue(issue)}`);
+      await sendTextMessage(to, `✅ ¡Aquí tienes los detalles! 👇\n\n${formatIssue(issue)}`);
     } catch {
       await sendTextMessage(
         to,
         `😟 No encontré el issue *${input.toUpperCase()}*.\n\n` +
-        `💡 _Verifica que la clave sea correcta (ej: PROJ-123) y que tengas acceso._`,
+        `💡 _Verifica que la clave sea correcta (ej: PROJ-123)._`,
       );
     }
     await done(to);
     return;
   }
 
-  // ── SEARCH ISSUES ──────────────────────────────────────────────────────────
+  // ── SEARCH ISSUES: paso 1 — seleccionar proyecto ───────────────────────────
   if (flow === 'search_issues' && currentStep === 'await_project') {
     const projectKey = extractProjectKey(interactiveId, text);
-    startSession(to, { flow: 'search_issues', step: 'await_status', data: { projectKey } });
-    await sendInteractiveButtons(to, {
-      body:
-        `🔎 *Buscar Issues*\n\n${stepLabel(2, 2, 'Estado')}\n` +
-        `${projectKey ? `Proyecto: *${projectKey}* ✅` : `Buscando en *todos los proyectos* 🌐`}\n\n` +
-        `¿Quieres filtrar por algún *estado*?`,
-      footer: '💡 Selecciona un estado',
-      buttons: [
-        { id: 'status_todo',       title: '⚪ To Do' },
-        { id: 'status_inprogress', title: '🔵 In Progress' },
-        { id: 'status_done',       title: '✅ Done' },
-      ],
-    });
-    return;
-  }
-
-  if (flow === 'search_issues' && currentStep === 'await_status') {
-    const statusMap = { status_todo: 'To Do', status_inprogress: 'In Progress', status_done: 'Done' };
-    const status = statusMap[interactiveId] ?? (text?.toLowerCase() === 'omitir' ? null : text) ?? null;
-
-    await sendTextMessage(
-      to,
-      `⏳ _Buscando issues${data.projectKey ? ` en *${data.projectKey}*` : ''}${status ? ` con estado *${status}*` : ''}..._`,
-    );
+    if (!projectKey) {
+      await sendTextMessage(to, `⚠️ Por favor selecciona un proyecto. 👆`);
+      return;
+    }
+    await sendTextMessage(to, `⏳ _Cargando issues del proyecto *${projectKey}*..._`);
     try {
-      const result = await jira.searchIssues({ projectKey: data.projectKey, status, maxResults: 10 });
+      const result = await jira.searchIssues({ projectKey, maxResults: 10 });
       if (!result.issues.length) {
         await sendTextMessage(
           to,
-          `🔍 No encontré issues con esos filtros. 🤷\n\n` +
-          `💡 _Prueba con otros criterios o verifica que el proyecto tenga issues._`,
+          `🔍 El proyecto *${projectKey}* no tiene issues disponibles. 🤔\n\n` +
+          `💡 _Intenta con otro proyecto._`,
         );
-      } else {
-        const list = result.issues
-          .map((i) => `• 🎫 *${i.key}* — ${i.fields.summary}\n  📊 _${i.fields.status.name}_`)
-          .join('\n\n');
-        await sendTextMessage(
-          to,
-          `✅ ¡Encontré *${result.total}* issue${result.total !== 1 ? 's' : ''}! ` +
-          `${result.total > 10 ? `_(mostrando los primeros 10)_ 📋` : `🎯`}\n\n${list}`,
-        );
+        await done(to);
+        return;
       }
+      startSession(to, { flow: 'search_issues', step: 'await_issue', data: { projectKey } });
+      await sendInteractiveList(to, {
+        body:
+          `🔎 *Issues en ${projectKey}*\n\n` +
+          `${stepLabel(2, 2, 'Seleccionar issue')}\n` +
+          `¡Encontré *${result.total}* issue${result.total !== 1 ? 's' : ''}!` +
+          `${result.total > 10 ? ' _(mostrando primeros 10)_' : ''}\n\n` +
+          `Selecciona uno para ver el detalle: 👇`,
+        footer: '💡 Toca un issue para ver sus detalles',
+        buttonText: '🎫 Ver issues',
+        sections: [{
+          title: `Issues — ${projectKey}`,
+          rows: result.issues.map((i) => ({
+            id:          `issue_${i.key}`,
+            title:       i.key.substring(0, 24),
+            description: `[${i.fields.status.name}] ${i.fields.summary}`.substring(0, 72),
+          })),
+        }],
+      });
     } catch (err) {
-      await sendTextMessage(to, `😟 Hubo un problema al buscar los issues.\n\n_Error: ${err.message}_`);
+      await sendTextMessage(to, `😟 No pude cargar los issues.\n\n_Error: ${err.message}_`);
+      await done(to);
+    }
+    return;
+  }
+
+  // ── SEARCH ISSUES: paso 2 — mostrar detalle del issue seleccionado ─────────
+  if (flow === 'search_issues' && currentStep === 'await_issue') {
+    if (!interactiveId?.startsWith('issue_')) {
+      await sendTextMessage(to, `⚠️ Por favor selecciona un issue de la lista. 👆`);
+      return;
+    }
+    const issueKey = interactiveId.slice(6);
+    await sendTextMessage(to, `⏳ _Cargando detalles de *${issueKey}*..._`);
+    try {
+      const issue = await jira.getIssue(issueKey);
+      await sendTextMessage(to, `✅ ¡Aquí tienes el detalle completo! 👇\n\n${formatIssue(issue)}`);
+    } catch {
+      await sendTextMessage(
+        to,
+        `😟 No pude cargar el issue *${issueKey}*.\n\n` +
+        `💡 _Intenta de nuevo o escribe *menu* para volver._`,
+      );
     }
     await done(to);
     return;
   }
 
-  // ── CREATE ISSUE ───────────────────────────────────────────────────────────
+  // ── CREATE ISSUE: paso 1 — proyecto ───────────────────────────────────────
   if (flow === 'create_issue' && currentStep === 'await_project') {
     const projectKey = extractProjectKey(interactiveId, text);
     if (!projectKey) {
-      await sendTextMessage(to, `⚠️ Debes seleccionar un proyecto específico para crear el issue. 👆`);
+      await sendTextMessage(to, `⚠️ Debes seleccionar un proyecto específico. 👆`);
       return;
     }
     startSession(to, { flow: 'create_issue', step: 'await_summary', data: { projectKey } });
@@ -399,10 +406,12 @@ const handleFlowStep = async (to, session, text, interactiveId) => {
     return;
   }
 
+  // ── CREATE ISSUE: paso 2 — resumen ────────────────────────────────────────
   if (flow === 'create_issue' && currentStep === 'await_summary') {
+    if (!input) { await sendTextMessage(to, `⚠️ El resumen no puede estar vacío. Escribe el título del issue:`); return; }
     startSession(to, { flow: 'create_issue', step: 'await_type', data: { ...data, summary: input } });
     await sendInteractiveButtons(to, {
-      body:   `➕ *Crear Issue*\n\n${stepLabel(3, 5, 'Tipo de issue')}\n¡Excelente resumen! ✍️ ¿Qué *tipo* de issue es?`,
+      body:   `➕ *Crear Issue*\n\n${stepLabel(3, 5, 'Tipo')}\n¡Excelente resumen! ✍️ ¿Qué *tipo* de issue es?`,
       footer: '💡 Elige el tipo que mejor describa tu tarea',
       buttons: [
         { id: 'type_task',  title: '📋 Task' },
@@ -413,12 +422,13 @@ const handleFlowStep = async (to, session, text, interactiveId) => {
     return;
   }
 
+  // ── CREATE ISSUE: paso 3 — tipo ───────────────────────────────────────────
   if (flow === 'create_issue' && currentStep === 'await_type') {
-    const typeMap = { type_task: 'Task', type_bug: 'Bug', type_story: 'Story' };
+    const typeMap  = { type_task: 'Task', type_bug: 'Bug', type_story: 'Story' };
     const issueType = typeMap[interactiveId] || text || 'Task';
     startSession(to, { flow: 'create_issue', step: 'await_priority', data: { ...data, issueType } });
     await sendInteractiveButtons(to, {
-      body:   `➕ *Crear Issue*\n\n${stepLabel(4, 5, 'Prioridad')}\n¡Ya casi terminamos! 🏁 ¿Qué *prioridad* tiene este issue?`,
+      body:   `➕ *Crear Issue*\n\n${stepLabel(4, 5, 'Prioridad')}\n¡Ya casi! 🏁 ¿Qué *prioridad* tiene este issue?`,
       footer: '💡 La prioridad ayuda al equipo a organizarse',
       buttons: [
         { id: 'priority_high',   title: '🔴 High' },
@@ -429,9 +439,10 @@ const handleFlowStep = async (to, session, text, interactiveId) => {
     return;
   }
 
+  // ── CREATE ISSUE: paso 4 — prioridad ─────────────────────────────────────
   if (flow === 'create_issue' && currentStep === 'await_priority') {
     const priorityMap = { priority_high: 'High', priority_medium: 'Medium', priority_low: 'Low' };
-    const priority = priorityMap[interactiveId] || text || 'Medium';
+    const priority    = priorityMap[interactiveId] || text || 'Medium';
     startSession(to, { flow: 'create_issue', step: 'await_description', data: { ...data, priority } });
     await sendTextMessage(
       to,
@@ -442,6 +453,7 @@ const handleFlowStep = async (to, session, text, interactiveId) => {
     return;
   }
 
+  // ── CREATE ISSUE: paso 5 — descripción → crear ────────────────────────────
   if (flow === 'create_issue' && currentStep === 'await_description') {
     const description = input.toLowerCase() === 'omitir' ? null : input;
     await sendTextMessage(to, `⏳ _Creando tu issue en Jira..._`);
@@ -471,8 +483,9 @@ const handleFlowStep = async (to, session, text, interactiveId) => {
     return;
   }
 
-  // ── UPDATE ISSUE ───────────────────────────────────────────────────────────
+  // ── UPDATE ISSUE: paso 1 — clave ─────────────────────────────────────────
   if (flow === 'update_issue' && currentStep === 'await_key') {
+    if (!input) { await sendTextMessage(to, `⚠️ Por favor ingresa la clave del issue. _Ejemplo: PROJ-123_`); return; }
     startSession(to, { flow: 'update_issue', step: 'await_field', data: { issueKey: input.toUpperCase() } });
     await sendInteractiveList(to, {
       body:       `✏️ *Actualizar Issue ${input.toUpperCase()}*\n\n${stepLabel(2, 3, 'Campo a modificar')}\n¿Qué campo deseas actualizar? 🛠️`,
@@ -490,6 +503,7 @@ const handleFlowStep = async (to, session, text, interactiveId) => {
     return;
   }
 
+  // ── UPDATE ISSUE: paso 2 — campo ─────────────────────────────────────────
   if (flow === 'update_issue' && currentStep === 'await_field') {
     const fieldMeta = {
       field_summary:     { key: 'summary',     label: 'nuevo resumen' },
@@ -498,26 +512,28 @@ const handleFlowStep = async (to, session, text, interactiveId) => {
     }[interactiveId];
 
     if (!fieldMeta) {
-      await sendTextMessage(to, `⚠️ Opción no reconocida. Por favor selecciona una opción del menú. 👆`);
+      await sendTextMessage(to, `⚠️ Por favor selecciona un campo de la lista. 👆`);
       return;
     }
     startSession(to, { flow: 'update_issue', step: 'await_value', data: { ...data, field: fieldMeta.key } });
     await sendTextMessage(
       to,
-      `✏️ *Actualizar Issue ${data.issueKey}*\n\n${stepLabel(3, 3, 'Nuevo valor')}\n` +
+      `✏️ *Actualizar ${data.issueKey}*\n\n${stepLabel(3, 3, 'Nuevo valor')}\n` +
       `¡Perfecto! 😊 Ingresa el ${fieldMeta.label}:`,
     );
     return;
   }
 
+  // ── UPDATE ISSUE: paso 3 — nuevo valor → actualizar ──────────────────────
   if (flow === 'update_issue' && currentStep === 'await_value') {
+    if (!input) { await sendTextMessage(to, `⚠️ El valor no puede estar vacío. Ingresa el nuevo ${data.field}:`); return; }
     await sendTextMessage(to, `⏳ _Actualizando *${data.issueKey}*..._`);
     try {
       await jira.updateIssue(data.issueKey, { [data.field]: input });
       await sendTextMessage(
         to,
-        `✅ *¡Issue actualizado exitosamente!* 🎯\n\n` +
-        `🎫 *${data.issueKey}* — campo *${data.field}* actualizado. 👌`,
+        `✅ *¡Issue actualizado!* 🎯\n\n` +
+        `🎫 *${data.issueKey}* — campo *${data.field}* actualizado correctamente. 👌`,
       );
     } catch (err) {
       await sendTextMessage(to, `😟 No pude actualizar el issue.\n\n_Error: ${err.message}_`);
@@ -526,16 +542,17 @@ const handleFlowStep = async (to, session, text, interactiveId) => {
     return;
   }
 
-  // ── TRANSITION ISSUE ───────────────────────────────────────────────────────
+  // ── TRANSITION ISSUE: paso 1 — clave ─────────────────────────────────────
   if (flow === 'transition_issue' && currentStep === 'await_key') {
-    await sendTextMessage(to, `⏳ _Cargando estados de *${input.toUpperCase()}*..._`);
+    if (!input) { await sendTextMessage(to, `⚠️ Por favor ingresa la clave del issue. _Ejemplo: PROJ-123_`); return; }
+    await sendTextMessage(to, `⏳ _Cargando estados disponibles para *${input.toUpperCase()}*..._`);
     try {
       const transitions = await jira.getTransitions(input.toUpperCase());
       if (!transitions.length) {
         await sendTextMessage(
           to,
-          `ℹ️ El issue *${input.toUpperCase()}* no tiene transiciones disponibles.\n\n` +
-          `💡 _Puede que ya esté en el estado final o no tengas permisos._`,
+          `ℹ️ *${input.toUpperCase()}* no tiene transiciones disponibles.\n\n` +
+          `💡 _Puede que ya esté en su estado final o no tengas permisos._`,
         );
         await done(to);
         return;
@@ -548,22 +565,25 @@ const handleFlowStep = async (to, session, text, interactiveId) => {
 
       const body =
         `🔄 *Cambiar Estado: ${input.toUpperCase()}*\n\n${stepLabel(2, 2, 'Nuevo estado')}\n` +
-        `¡Aquí están los estados disponibles! ¿A dónde lo movemos? 🚀`;
+        `¿A qué estado lo movemos? 🚀`;
 
       if (transitions.length > 3) {
         await sendInteractiveList(to, {
           body,
-          footer:     '💡 Selecciona el estado al que deseas mover',
+          footer:     '💡 Selecciona el estado destino',
           buttonText: '🔄 Ver estados',
           sections: [{
             title: 'Estados disponibles',
-            rows:  transitions.slice(0, 10).map((t) => ({ id: `tr_${t.id}`, title: t.name.substring(0, 24) })),
+            rows:  transitions.slice(0, 10).map((t) => ({
+              id:    `tr_${t.id}`,
+              title: t.name.substring(0, 24),
+            })),
           }],
         });
       } else {
         await sendInteractiveButtons(to, {
           body,
-          footer:  '💡 Selecciona el nuevo estado del issue',
+          footer:  '💡 Selecciona el nuevo estado',
           buttons: transitions.map((t) => ({ id: `tr_${t.id}`, title: t.name.substring(0, 20) })),
         });
       }
@@ -571,55 +591,59 @@ const handleFlowStep = async (to, session, text, interactiveId) => {
       await sendTextMessage(
         to,
         `😟 No encontré el issue *${input.toUpperCase()}*.\n\n` +
-        `💡 _Verifica la clave (ej: PROJ-123) y que tengas acceso._`,
+        `💡 _Verifica la clave (ej: PROJ-123)._`,
       );
       await done(to);
     }
     return;
   }
 
+  // ── TRANSITION ISSUE: paso 2 — transición ────────────────────────────────
   if (flow === 'transition_issue' && currentStep === 'await_transition') {
-    const transitionId = interactiveId?.replace('tr_', '');
-    if (!transitionId || !interactiveId?.startsWith('tr_')) {
-      await sendTextMessage(to, `⚠️ Por favor selecciona un estado válido del menú. 👆`);
+    if (!interactiveId?.startsWith('tr_')) {
+      await sendTextMessage(to, `⚠️ Por favor selecciona un estado del menú. 👆`);
       return;
     }
+    const transitionId = interactiveId.slice(3);
     await sendTextMessage(to, `⏳ _Cambiando estado..._`);
     try {
       await jira.transitionIssue(data.issueKey, transitionId);
       const transition = data.transitions.find((t) => String(t.id) === String(transitionId));
       await sendTextMessage(
         to,
-        `🎉 *¡Estado actualizado exitosamente!*\n\n` +
+        `🎉 *¡Estado actualizado!*\n\n` +
         `🎫 *${data.issueKey}* movido a *${transition?.name || transitionId}* ✅\n\n` +
         `✨ _¡El equipo verá el cambio en tiempo real!_`,
       );
     } catch (err) {
-      await sendTextMessage(to, `😟 No pude cambiar el estado del issue.\n\n_Error: ${err.message}_`);
+      await sendTextMessage(to, `😟 No pude cambiar el estado.\n\n_Error: ${err.message}_`);
     }
     await done(to);
     return;
   }
 
-  // ── ADD COMMENT ────────────────────────────────────────────────────────────
+  // ── ADD COMMENT: paso 1 — clave ───────────────────────────────────────────
   if (flow === 'add_comment' && currentStep === 'await_key') {
+    if (!input) { await sendTextMessage(to, `⚠️ Por favor ingresa la clave del issue. _Ejemplo: PROJ-123_`); return; }
     startSession(to, { flow: 'add_comment', step: 'await_text', data: { issueKey: input.toUpperCase() } });
     await sendTextMessage(
       to,
       `💬 *Comentar en ${input.toUpperCase()}*\n\n${stepLabel(2, 2, 'Comentario')}\n` +
-      `¡Perfecto! 😊 Escribe el *comentario* que deseas agregar:\n\n` +
+      `Escribe el *comentario* que deseas agregar: 😊\n\n` +
       `_Será visible para todo el equipo con acceso al proyecto. 👥_`,
     );
     return;
   }
 
+  // ── ADD COMMENT: paso 2 — texto → agregar ────────────────────────────────
   if (flow === 'add_comment' && currentStep === 'await_text') {
+    if (!input) { await sendTextMessage(to, `⚠️ El comentario no puede estar vacío. Escribe tu comentario:`); return; }
     await sendTextMessage(to, `⏳ _Agregando tu comentario..._`);
     try {
       await jira.addComment(data.issueKey, input);
       await sendTextMessage(
         to,
-        `🎉 *¡Comentario agregado exitosamente!* 💬\n\n` +
+        `🎉 *¡Comentario agregado!* 💬\n\n` +
         `Tu comentario fue publicado en *${data.issueKey}* y ya es visible para el equipo. 👥✨`,
       );
     } catch (err) {
@@ -629,7 +653,7 @@ const handleFlowStep = async (to, session, text, interactiveId) => {
     return;
   }
 
-  // Fallback — step/flow desconocido, reiniciar limpiamente
+  // Fallback — step/flow desconocido
   cancelExpiry(to);
   clearSession(to);
   await sendWelcomeAndMenu(to);
@@ -654,6 +678,7 @@ const handleMessage = async (message) => {
 
   const lowerText = text?.toLowerCase();
 
+  // Cancelar siempre cierra todo
   if (text && CANCEL_KEYWORDS.has(lowerText)) {
     cancelExpiry(to);
     clearSession(to);
@@ -661,6 +686,7 @@ const handleMessage = async (message) => {
     return;
   }
 
+  // Reset keywords → bienvenida + menú
   if (text && RESET_KEYWORDS.has(lowerText)) {
     cancelExpiry(to);
     clearSession(to);
@@ -670,9 +696,15 @@ const handleMessage = async (message) => {
 
   const session = getSession(to);
 
-  // Sin flujo activo + respuesta interactiva → selección del menú principal
+  // Respuesta interactiva sin flujo activo
   if (interactiveId && (!session || !session.flow)) {
-    await handleMenuSelection(to, interactiveId);
+    if (MENU_IDS.has(interactiveId)) {
+      // Selección válida del menú principal
+      await handleMenuSelection(to, interactiveId);
+    } else {
+      // ID desconocido sin sesión (sesión expirada o servidor reiniciado)
+      await sendWelcomeAndMenu(to);
+    }
     return;
   }
 
