@@ -37,8 +37,11 @@ const searchIssues = async ({ projectKey, issueType, status, assignee, maxResult
 
   const jql = conditions.length > 0 ? conditions.join(' AND ') : 'ORDER BY created DESC';
 
-  const { data } = await client.get('/search', {
-    params: { jql, maxResults, startAt, fields: 'summary,status,issuetype,assignee,priority,description,project' },
+  const { data } = await client.post('/search/jql', {
+    jql,
+    maxResults,
+    startAt,
+    fields: ['summary', 'status', 'issuetype', 'assignee', 'priority', 'description', 'project'],
   });
   return data;
 };
