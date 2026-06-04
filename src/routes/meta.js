@@ -31,10 +31,12 @@ router.post('/auth', async (req, res) => {
       if (entry.changes) {
         for (const change of entry.changes) {
           if (change.value?.messages) {
+            const contacts = change.value.contacts || [];
             for (const message of change.value.messages) {
               try {
+                const contact = contacts.find((item) => item.wa_id === message.from);
                 // Forzamos a la función a esperar la ejecución completa
-                await handleMessage(message);
+                await handleMessage(message, contact);
               } catch (err) {
                 console.error('Error handling WhatsApp message:', err.message);
               }

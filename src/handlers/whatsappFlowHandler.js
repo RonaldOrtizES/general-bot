@@ -1,11 +1,63 @@
 const { sendTextMessage, sendInteractiveList, sendInteractiveButtons } = require('../services/whatsappService');
-const { getSession, setSession, clearSession } = require('../services/conversationService');
+const {
+  getSession,
+  setSession,
+  clearSession,
+  getActiveConversation,
+  markConversationActive,
+  clearActiveConversation,
+} = require('../services/conversationService');
 const jira = require('../services/jiraService');
+const events = require('../services/eventsService');
 
 // ─── Timers de inactividad ────────────────────────────────────────────────────
 
 const INACTIVITY_MS = 3 * 60 * 1000;
 const timers = new Map();
+
+const getMessageContent = (message, text, interactiveId) => {
+  if (message.type === 'text') return text || '';
+  if (message.type === 'interactive') return interactiveId || 'interactive';
+  return message[message.type]?.caption || message.type || '';
+};
+
+const trackConversationStart = async (to, message, contact, text, interactiveId) => {
+  if (getActiveConversation(to)) {
+    markConversationActive(to);
+    return;
+  }
+
+  const nombreCliente = contact?.profile?.name || contact?.wa_id || 'Cliente WhatsApp';
+  const contenido = getMessageContent(message, text, interactiveId);
+
+  markConversationActive(to, { nombreCliente });
+
+  try {
+    await events.startConversation({
+      telefonoOrigen: to,
+      nombreCliente,
+      contenido,
+      messageType: message.type || 'unknown',
+    });
+  } catch (err) {
+    const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
+    console.error(`[JiraBot] conversation start event failed ${to}:`, detail);
+  }
+};
+
+const trackConversationClose = async (to, aiHandledFully = true) => {
+  clearActiveConversation(to);
+
+  try {
+    await events.closeConversationAutomatically({
+      telefonoOrigen: to,
+      aiHandledFully,
+    });
+  } catch (err) {
+    const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
+    console.error(`[JiraBot] conversation close event failed ${to}:`, detail);
+  }
+};
 
 const sendGoodbye = async (to, reason) => {
   if (reason === 'cancel') {
@@ -38,8 +90,9 @@ const scheduleExpiry = (userId) => {
   cancelExpiry(userId);
   const timer = setTimeout(async () => {
     timers.delete(userId);
-    if (getSession(userId)) {
+    if (getSession(userId) || getActiveConversation(userId)) {
       clearSession(userId);
+      await trackConversationClose(userId, true);
       try { await sendGoodbye(userId, 'timeout'); } catch (e) {
         console.error(`[JiraBot] timeout goodbye error ${userId}:`, e.message);
       }
@@ -112,6 +165,7 @@ const sendWelcomeAndMenu = async (to) => {
   cancelExpiry(to);
   await sendTextMessage(to, GREETING_TEXT);
   await sendInteractiveList(to, { ...MENU_PAYLOAD, body: `👆 *Aquí tienes todo lo que puedo hacer por ti:*` });
+  scheduleExpiry(to);
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -139,9 +193,9 @@ const formatIssue = (issue) => {
 };
 
 const done = async (to) => {
-  cancelExpiry(to);
   clearSession(to);
   await sendMainMenu(to);
+  scheduleExpiry(to);
 };
 
 // ─── Selector de proyectos ────────────────────────────────────────────────────
@@ -664,7 +718,7 @@ const handleFlowStep = async (to, session, text, interactiveId) => {
 const CANCEL_KEYWORDS = new Set(['cancelar', 'cancel']);
 const RESET_KEYWORDS  = new Set(['menu', 'menú', 'inicio', 'hola', 'hi', 'hello', 'start', '/start']);
 
-const handleMessage = async (message) => {
+const handleMessage = async (message, contact = null) => {
   const to = message.from;
   let text          = null;
   let interactiveId = null;
@@ -677,11 +731,13 @@ const handleMessage = async (message) => {
   }
 
   const lowerText = text?.toLowerCase();
+  await trackConversationStart(to, message, contact, text, interactiveId);
 
   // Cancelar siempre cierra todo
   if (text && CANCEL_KEYWORDS.has(lowerText)) {
     cancelExpiry(to);
     clearSession(to);
+    await trackConversationClose(to, true);
     await sendGoodbye(to, 'cancel');
     return;
   }
