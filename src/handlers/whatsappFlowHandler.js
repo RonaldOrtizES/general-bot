@@ -32,31 +32,27 @@ const trackConversationStart = async (to, message, contact, text, interactiveId)
 
   markConversationActive(to, { nombreCliente });
 
-  try {
-    await events.startConversation({
-      telefonoOrigen: to,
-      nombreCliente,
-      contenido,
-      messageType: message.type || 'unknown',
-    });
-  } catch (err) {
+  events.startConversation({
+    telefonoOrigen: to,
+    nombreCliente,
+    contenido,
+    messageType: message.type || 'unknown',
+  }).catch((err) => {
     const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
     console.error(`[JiraBot] conversation start event failed ${to}:`, detail);
-  }
+  });
 };
 
 const trackConversationClose = async (to, aiHandledFully = true) => {
   clearActiveConversation(to);
 
-  try {
-    await events.closeConversationAutomatically({
-      telefonoOrigen: to,
-      aiHandledFully,
-    });
-  } catch (err) {
+  return events.closeConversationAutomatically({
+    telefonoOrigen: to,
+    aiHandledFully,
+  }).catch((err) => {
     const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
     console.error(`[JiraBot] conversation close event failed ${to}:`, detail);
-  }
+  });
 };
 
 const sendGoodbye = async (to, reason) => {
@@ -731,7 +727,7 @@ const handleMessage = async (message, contact = null) => {
   }
 
   const lowerText = text?.toLowerCase();
-  await trackConversationStart(to, message, contact, text, interactiveId);
+  trackConversationStart(to, message, contact, text, interactiveId);
 
   // Cancelar siempre cierra todo
   if (text && CANCEL_KEYWORDS.has(lowerText)) {
